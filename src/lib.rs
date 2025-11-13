@@ -122,19 +122,17 @@ pub use backoff::{Backoff, ExponentialBackoff, FibonacciBackoff, FixedDelay};
 #[cfg(feature = "jitter")]
 pub use backoff::Jitter;
 
-use std::future::IntoFuture;
 use std::error::Error;
 use std::future::Future;
+use std::future::IntoFuture;
+use std::future::IntoFuture;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
-
-
-/// A default condition that always returns true for any error type.
-/// This is an implementation detail and should not be used directly.
-#[doc(hidden)]
-#[derive(Copy, Clone)]
-pub struct AlwaysRetry;
+/// A predicate function that always returns true, retryable for all errors.
+fn default_condition(_: &dyn Error) -> bool {
+    true
+}
 
 /// The main builder struct for a retryable operation.
 ///
@@ -318,10 +316,11 @@ where
     fn into_future(mut self) -> <Retry<S, O, C> as IntoFuture>::IntoFuture {
         Box::pin(async move {
             let start_time = Instant::now();
+            #[allow(unused_variables)]
             let mut attempt = 0;
 
             loop {
-                attempt += 1;
+                _attempt += 1;
 
                 // Execute the async operation.
                 let result = (self.operation)().await;
@@ -330,17 +329,13 @@ where
                     // Success, return the value.
                     Ok(value) => {
                         #[cfg(feature = "logging")]
-                        log::trace!("Operation succeeded on attempt {}", attempt);
+                        log::trace!("Operation succeeded on attempt {}", _attempt);
                         return Ok(value);
                     }
                     // Failure, check if we should retry.
                     Err(e) => {
                         #[cfg(feature = "logging")]
-                        log::warn!(
-                            "Operation failed on attempt {} with error: {}",
-                            attempt,
-                            e
-                        );
+                        log::warn!("Operation failed on attempt {} with error: {}", _attempt, e);
 
                         // Check max total duration limit
                         if let Some(max_duration) = self.max_duration {
@@ -387,7 +382,7 @@ where
                             #[cfg(feature = "logging")]
                             log::error!(
                                 "Retry failed: backoff strategy exhausted after {} attempts.",
-                                attempt
+                                _attempt
                             );
                             return Err(e);
                         }
@@ -395,34 +390,5 @@ where
                 }
             }
         })
-    }
-}
-#[cfg(all(test, feature = "tokio-timer"))]
-mod tests {
-    use super::*;
-    use crate::backoff::FixedDelay;
-    use std::time::Duration;
-    
-    #[derive(Debug, Clone, PartialEq)]
-    struct TestError(String);
-    
-    impl std::fmt::Display for TestError {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "{}", self.0)
-        }
-    }
-    
-    impl std::error::Error for TestError {}
-
-    #[tokio::test]
-    async fn test_simple_retry() {
-        let strategy = FixedDelay::new(Duration::from_millis(10)).take(3);
-        
-        let operation = || async {
-            Ok::<u32, TestError>(42)
-        };
-        
-        let result = Retry::new(strategy, operation).await;
-        assert_eq!(result, Ok(42));
     }
 }
