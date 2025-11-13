@@ -106,9 +106,10 @@ pub use backoff::{Backoff, ExponentialBackoff, FibonacciBackoff, FixedDelay};
 #[cfg(feature = "jitter")]
 pub use backoff::Jitter;
 
-use std::future::IntoFuture;
 use std::error::Error;
 use std::future::Future;
+use std::future::IntoFuture;
+use std::future::IntoFuture;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
@@ -215,7 +216,7 @@ where
             let mut attempt = 0;
 
             loop {
-                attempt += 1;
+                _attempt += 1;
 
                 // Execute the async operation.
                 let result = (self.operation)().await;
@@ -224,17 +225,13 @@ where
                     // Success, return the value.
                     Ok(value) => {
                         #[cfg(feature = "logging")]
-                        log::trace!("Operation succeeded on attempt {}", attempt);
+                        log::trace!("Operation succeeded on attempt {}", _attempt);
                         return Ok(value);
                     }
                     // Failure, check if we should retry.
                     Err(e) => {
                         #[cfg(feature = "logging")]
-                        log::warn!(
-                            "Operation failed on attempt {} with error: {}",
-                            attempt,
-                            e
-                        );
+                        log::warn!("Operation failed on attempt {} with error: {}", _attempt, e);
 
                         // Check max total duration limit
                         if let Some(max_duration) = self.max_duration {
@@ -281,7 +278,7 @@ where
                             #[cfg(feature = "logging")]
                             log::error!(
                                 "Retry failed: backoff strategy exhausted after {} attempts.",
-                                attempt
+                                _attempt
                             );
                             return Err(e);
                         }
