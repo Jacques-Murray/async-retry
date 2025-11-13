@@ -18,7 +18,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! async-retry = { version = "0.1", features = ["tokio-timer"] }
+//! async-retry = { path = "path/to/async-retry" }
 //! # Enable your runtime (e.g., Tokio)
 //! tokio = { version = "1", features = ["full"] }
 //! ```
@@ -31,6 +31,11 @@
 //! ```rust,no_run
 //! use async_retry::{Retry, backoff::ExponentialBackoff};
 //! use std::time::Duration;
+//! use thiserror::Error;
+//!
+//! #[derive(Debug, Error)]
+//! #[error("Failed to connect: {0}")]
+//! struct ConnectionError(String);
 //!
 //! // Define a simple error type
 //! #[derive(Debug, Clone)]
@@ -45,9 +50,9 @@
 //! impl std::error::Error for MyError {}
 //!
 //! // A mock function that might fail
-//! async fn fetch_data() -> Result<String, MyError> {
+//! async fn fetch_data() -> Result<String, ConnectionError> {
 //!     // ... logic that might fail
-//!     Err(MyError("Failed to connect".to_string()))
+//!     Err(ConnectionError("Network error".to_string()))
 //! }
 //!
 //! #[tokio::main]
@@ -84,8 +89,8 @@
 //! impl std::fmt::Display for MyError {
 //!     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 //!         match self {
-//!             MyError::TransientNetworkError => write!(f, "Transient network error"),
-//!             MyError::PermanentAuthError => write!(f, "Permanent auth error"),
+//!             MyError::TransientNetworkError => write!(f, "Network error"),
+//!             MyError::PermanentAuthError => write!(f, "Auth error"),
 //!         }
 //!     }
 //! }
@@ -130,17 +135,16 @@ pub use backoff::{Backoff, ExponentialBackoff, FibonacciBackoff, FixedDelay};
 pub use backoff::Jitter;
 
 use std::error::Error;
-use std::future::{Future, IntoFuture};
+use std::future::Future;
+use std::future::IntoFuture;
+use std::future::IntoFuture;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
-/// A marker type that indicates all errors should be retried.
-///
-/// This is the default condition used by [`Retry::new()`]. When using this condition,
-/// the retry loop will attempt to retry all errors until the backoff strategy is
-/// exhausted or other limits (like `max_duration`) are reached.
-#[derive(Clone, Copy, Debug)]
-pub struct RetryAll;
+/// A predicate function that always returns true, retryable for all errors.
+fn default_condition(_: &dyn Error) -> bool {
+    true
+}
 
 /// The main builder struct for retryable operations.
 ///
@@ -217,8 +221,8 @@ where
     max_duration: Option<Duration>,
 }
 
-// Implementation block for creating a new Retry that retries on all errors.
-impl<S, O> Retry<S, O, RetryAll>
+// Implementation block for creating a new Retry with the default condition.
+impl<S, O> Retry<S, O, AlwaysRetry>
 where
     S: Backoff,
 {
@@ -264,7 +268,7 @@ where
         Self {
             strategy,
             operation,
-            condition: RetryAll,
+            condition: AlwaysRetry,
             max_duration: None,
         }
     }
@@ -332,9 +336,8 @@ where
 
     /// Sets a maximum total duration for the entire retry operation.
     ///
-    /// This limits the total time spent retrying, including all delays between attempts.
-    /// If this duration is exceeded, the retry loop stops and returns the last error,
-    /// even if more retries would be available from the backoff strategy.
+    /// If the total time (including retries and delays) exceeds this
+    /// duration, the loop will stop and return the last error.
     ///
     /// # Arguments
     ///
@@ -377,24 +380,22 @@ where
     }
 }
 
-/// The core retry logic for RetryAll, implemented via `IntoFuture`.
-///
-/// This allows `Retry` to be `.await`ed directly when using RetryAll (retries all errors).
-impl<S, O, F, T, E> IntoFuture for Retry<S, O, RetryAll>
+/// The core retry logic, implemented via `IntoFuture` for the default (always retry) condition.
+impl<S, O, F, T, E> IntoFuture for Retry<S, O, AlwaysRetry>
 where
     S: Backoff + Send + 'static,
     O: FnMut() -> F + Send + 'static,
     F: Future<Output = Result<T, E>> + Send,
-    E: Send + std::fmt::Display,
+    E: Error + Send,
     T: Send,
 {
     type Output = Result<T, E>;
 
     // We box the future to avoid complex type signatures in the return.
-    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send>>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'static>>;
 
     /// Contains the core retry loop logic.
-    fn into_future(mut self) -> Self::IntoFuture {
+    fn into_future(mut self) -> <Retry<S, O, AlwaysRetry> as IntoFuture>::IntoFuture {
         Box::pin(async move {
             let start_time = Instant::now();
             let mut _attempt = 0;
@@ -433,7 +434,7 @@ where
                             }
                         }
 
-                        // RetryAll always retries, so no condition check needed
+                        // Always retry with AlwaysRetry condition
 
                         // Get next backoff duration
                         if let Some(delay) = self.strategy.next() {
@@ -469,28 +470,27 @@ where
     }
 }
 
-/// The core retry logic for custom conditions, implemented via `IntoFuture`.
-///
-/// This allows `Retry` to be `.await`ed directly when using a custom condition.
+/// The core retry logic, implemented via `IntoFuture` for custom conditions.
 impl<S, O, C, F, T, E> IntoFuture for Retry<S, O, C>
 where
     S: Backoff + Send + 'static,
     O: FnMut() -> F + Send + 'static,
     C: FnMut(&E) -> bool + Send + 'static,
     F: Future<Output = Result<T, E>> + Send,
-    E: Send + std::fmt::Display,
+    E: Error + Send,
     T: Send,
 {
     type Output = Result<T, E>;
 
     // We box the future to avoid complex type signatures in the return.
-    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send>>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'static>>;
 
     /// Contains the core retry loop logic.
-    fn into_future(mut self) -> Self::IntoFuture {
+    fn into_future(mut self) -> <Retry<S, O, C> as IntoFuture>::IntoFuture {
         Box::pin(async move {
             let start_time = Instant::now();
-            let mut _attempt = 0;
+            #[allow(unused_variables)]
+            let mut attempt = 0;
 
             loop {
                 _attempt += 1;
@@ -508,11 +508,7 @@ where
                     // Failure, check if we should retry.
                     Err(e) => {
                         #[cfg(feature = "logging")]
-                        log::warn!(
-                            "Operation failed on attempt {} with error: {}",
-                            _attempt,
-                            e
-                        );
+                        log::warn!("Operation failed on attempt {} with error: {}", _attempt, e);
 
                         // Check max total duration limit
                         if let Some(max_duration) = self.max_duration {

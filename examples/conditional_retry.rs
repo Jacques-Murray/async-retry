@@ -1,6 +1,9 @@
 // Author: Jacques Murray
 
+mod common;
+
 use async_retry::{backoff::ExponentialBackoff, Retry};
+use common::{should_retry_api_error, ApiError};
 use std::time::Duration;
 use thiserror::Error;
 

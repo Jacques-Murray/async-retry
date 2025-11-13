@@ -1,7 +1,6 @@
 // Author: Jacques Murray
 
 use async_retry::{backoff::FixedDelay, Retry};
-use std::future::Future;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -36,18 +35,15 @@ impl Op {
         }
     }
 
-    // The operation itself - clones self so it can be called multiple times
-    fn run(&self) -> impl Future<Output = Result<u32, TestError>> {
-        let op = self.clone();
-        async move {
-            let current = op.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+    // The operation itself
+    async fn run(&self) -> Result<u32, TestError> {
+        let current = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
 
-            if current == op.succeed_on {
-                Ok(current)
-            } else {
-                // Clone the error to return it
-                Err(op.error_to_return.clone())
-            }
+        if current == self.succeed_on {
+            Ok(current)
+        } else {
+            // Clone the error to return it
+            Err(TestError(self.error_to_return.0.clone()))
         }
     }
 
@@ -62,7 +58,10 @@ async fn test_success_on_first_try() {
     let strategy = FixedDelay::new(Duration::from_millis(10)).take(5);
 
     let op_clone = op.clone();
-    let result = Retry::new(strategy, move || op_clone.run()).await;
+    let result = Retry::new(strategy, move || {
+        let op = op_clone.clone();
+        async move { op.run().await }
+    }).await;
 
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), 1);
@@ -75,7 +74,10 @@ async fn test_success_on_third_try() {
     let strategy = FixedDelay::new(Duration::from_millis(10)).take(5);
 
     let op_clone = op.clone();
-    let result = Retry::new(strategy, move || op_clone.run()).await;
+    let result = Retry::new(strategy, move || {
+        let op = op_clone.clone();
+        async move { op.run().await }
+    }).await;
 
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), 3);
@@ -86,17 +88,20 @@ async fn test_success_on_third_try() {
 async fn test_failure_on_max_retries() {
     // Max Retries
     let op = Op::new(10, "fail"); // Succeeds on attempt 10
-    let strategy = FixedDelay::new(Duration::from_millis(10)).take(3); // 3 delays = 4 attempts total
+    let strategy = FixedDelay::new(Duration::from_millis(10)).take(3); // 3 retries = 4 total attempts (1 initial + 3 retries)
 
     let start = Instant::now();
     let op_clone = op.clone();
-    let result = Retry::new(strategy, move || op_clone.run()).await;
+    let result = Retry::new(strategy, move || {
+        let op = op_clone.clone();
+        async move { op.run().await }
+    }).await;
 
     let elapsed = start.elapsed();
 
     assert!(result.is_err());
     assert_eq!(result.unwrap_err(), TestError("fail".to_string()));
-    assert_eq!(op.attempts(), 4); // 1 initial + 3 retries
+    assert_eq!(op.attempts(), 4); // 1 initial attempt + 3 retries = 4 total attempts
     // Check that it slept 3 times (10ms + 10ms + 10ms)
     assert!(elapsed >= Duration::from_millis(30));
 }
@@ -109,7 +114,10 @@ async fn test_failure_on_max_duration() {
     let strategy = FixedDelay::new(Duration::from_millis(50)).take(10);
 
     let op_clone = op.clone();
-    let result = Retry::new(strategy, move || op_clone.run())
+    let result = Retry::new(strategy, move || {
+        let op = op_clone.clone();
+        async move { op.run().await }
+    })
         .with_max_duration(Duration::from_millis(75)) // Max duration is 75ms
         .await;
 
@@ -129,7 +137,10 @@ async fn test_failure_on_condition() {
     let condition = |e: &TestError| e.0 != "PERMANENT";
 
     let op_clone = op.clone();
-    let result = Retry::new(strategy, move || op_clone.run())
+    let result = Retry::new(strategy, move || {
+        let op = op_clone.clone();
+        async move { op.run().await }
+    })
         .with_condition(condition)
         .await;
 
