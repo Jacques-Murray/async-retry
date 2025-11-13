@@ -88,7 +88,7 @@ async fn test_success_on_third_try() {
 async fn test_failure_on_max_retries() {
     // Max Retries
     let op = Op::new(10, "fail"); // Succeeds on attempt 10
-    let strategy = FixedDelay::new(Duration::from_millis(10)).take(3); // But we only allow 3 attempts
+    let strategy = FixedDelay::new(Duration::from_millis(10)).take(3); // 3 retries = 4 total attempts (1 initial + 3 retries)
 
     let start = Instant::now();
     let op_clone = op.clone();
@@ -101,9 +101,9 @@ async fn test_failure_on_max_retries() {
 
     assert!(result.is_err());
     assert_eq!(result.unwrap_err(), TestError("fail".to_string()));
-    assert_eq!(op.attempts(), 3); // Stopped after 3 attempts
-    // Check that it slept twice (10ms + 10ms)
-    assert!(elapsed >= Duration::from_millis(20));
+    assert_eq!(op.attempts(), 4); // 1 initial attempt + 3 retries = 4 total attempts
+    // Check that it slept 3 times (10ms + 10ms + 10ms)
+    assert!(elapsed >= Duration::from_millis(30));
 }
 
 #[tokio::test]

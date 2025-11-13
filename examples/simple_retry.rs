@@ -2,9 +2,17 @@
 
 use async_retry::{backoff::ExponentialBackoff, Retry};
 use std::time::{Duration, Instant};
+use thiserror::Error;
+
+// Define a proper error type
+#[derive(Debug, Error)]
+#[error("Operation failed: {message}")]
+struct OperationError {
+    message: String,
+}
 
 // A mock function that will fail 3 times before succeeding.
-async fn flaky_operation() -> Result<String, String> {
+async fn flaky_operation() -> Result<String, OperationError> {
     // Use a static to track attempts across calls
     static ATTEMPTS: tokio::sync::Mutex<u32> = tokio::sync::Mutex::const_new(0);
 
@@ -15,7 +23,9 @@ async fn flaky_operation() -> Result<String, String> {
 
     if *attempts <= 3 {
         println!("Attempt {}: Failed.", *attempts);
-        Err(format!("Failed on attempt {}", *attempts))
+        Err(OperationError {
+            message: format!("Failed on attempt {}", *attempts),
+        })
     } else {
         println!("Attempt {}: Succeeded.", *attempts);
         Ok("Got the data!".to_string())
