@@ -1,10 +1,15 @@
 // Author: Jacques Murray
 
-use async_retry_project::{backoff::ExponentialBackoff, Retry};
+use async_retry::{backoff::ExponentialBackoff, Retry};
 use std::time::{Duration, Instant};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+#[error("{0}")]
+struct RetryError(String);
 
 // A mock function that will fail 3 times before succeeding.
-async fn flaky_operation() -> Result<String, String> {
+async fn flaky_operation() -> Result<String, RetryError> {
     // Use a static to track attempts across calls
     static ATTEMPTS: tokio::sync::Mutex<u32> = tokio::sync::Mutex::const_new(0);
 
@@ -15,7 +20,7 @@ async fn flaky_operation() -> Result<String, String> {
 
     if *attempts <= 3 {
         println!("Attempt {}: Failed.", *attempts);
-        Err(format!("Failed on attempt {}", *attempts))
+        Err(RetryError(format!("Failed on attempt {}", *attempts)))
     } else {
         println!("Attempt {}: Succeeded.", *attempts);
         Ok("Got the data!".to_string())
@@ -33,7 +38,7 @@ async fn main() {
     let start = Instant::now();
 
     // The operation is a closure that returns the async block (Future)
-    let operation = || async { flaky_operation().await };
+    let operation = move || async move { flaky_operation().await };
 
     let result = Retry::new(strategy, operation).await;
 

@@ -1,11 +1,39 @@
 // Author: Jacques Murray
 
-mod common;
-
-use async_retry_project::{backoff::ExponentialBackoff, Retry};
-use common::{should_retry_api_error, ApiError};
-use reqwest::StatusCode;
+use async_retry::{backoff::ExponentialBackoff, Retry};
 use std::time::Duration;
+use thiserror::Error;
+
+/// A custom error type for the `reqwest` examples.
+///
+/// This demonstrates how to implement a condition function
+/// for a specific error type.
+#[derive(Debug, Error)]
+pub enum ApiError {
+    #[error("Network connection error: {0}")]
+    Connection(#[from] reqwest::Error),
+
+    #[error("Server error: {0}")]
+    ServerError(String),
+
+    #[error("Client error (not retryable): {0}")]
+    ClientError(String),
+}
+
+/// The condition function for the example.
+///
+/// This implements the logic from the PRD's Example 2:
+/// "Only retry on transient network errors... or server errors."
+pub fn should_retry_api_error(e: &ApiError) -> bool {
+    match e {
+        // Retry on network errors
+        ApiError::Connection(_) => true,
+        // Retry on 5xx server errors
+        ApiError::ServerError(_) => true,
+        // DO NOT retry on 4xx client errors
+        ApiError::ClientError(_) => false,
+    }
+}
 
 /// A mock API fetcher.
 /// We use `httpstat.us` to force specific HTTP error codes.
@@ -34,7 +62,7 @@ async fn run_example(code: u16, desc: &str) {
         .with_max_retries(3); // 3 retries = 3 total attempts
 
     // The operation closure captures the status code
-    let operation = || async { fetch_important_data(code).await };
+    let operation = move || async move { fetch_important_data(code).await };
 
     let result = Retry::new(strategy, operation)
         .with_condition(should_retry_api_error) // Use our custom condition

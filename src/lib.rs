@@ -18,7 +18,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! async-retry-project = { path = "path/to/async-retry-project" }
+//! async-retry = { version = "0.1", features = ["tokio-timer"] }
 //! # Enable your runtime (e.g., Tokio)
 //! tokio = { version = "1", features = ["full"] }
 //! ```
@@ -29,13 +29,25 @@
 //! ### Example: Simple Retry
 //!
 //! ```rust,no_run
-//! use async_retry_project::{Retry, backoff::ExponentialBackoff};
+//! use async_retry::{Retry, backoff::ExponentialBackoff};
 //! use std::time::Duration;
 //!
+//! // Define a simple error type
+//! #[derive(Debug, Clone)]
+//! struct MyError(String);
+//!
+//! impl std::fmt::Display for MyError {
+//!     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//!         write!(f, "{}", self.0)
+//!     }
+//! }
+//!
+//! impl std::error::Error for MyError {}
+//!
 //! // A mock function that might fail
-//! async fn fetch_data() -> Result<String, String> {
+//! async fn fetch_data() -> Result<String, MyError> {
 //!     // ... logic that might fail
-//!     Err("Failed to connect".to_string())
+//!     Err(MyError("Failed to connect".to_string()))
 //! }
 //!
 //! #[tokio::main]
@@ -43,7 +55,7 @@
 //!     let strategy = ExponentialBackoff::new(Duration::from_millis(100))
 //!         .with_max_retries(5);
 //!
-//!     let operation = || async {
+//!     let operation = move || async move {
 //!         fetch_data().await
 //!     };
 //!
@@ -59,7 +71,7 @@
 //! ### Example: Conditional Retry
 //!
 //! ```rust,no_run
-//! use async_retry_project::{Retry, backoff::ExponentialBackoff};
+//! use async_retry::{Retry, backoff::ExponentialBackoff};
 //! use std::time::Duration;
 //!
 //! // Define a custom error
@@ -68,6 +80,17 @@
 //!     TransientNetworkError,
 //!     PermanentAuthError,
 //! }
+//!
+//! impl std::fmt::Display for MyError {
+//!     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//!         match self {
+//!             MyError::TransientNetworkError => write!(f, "Transient network error"),
+//!             MyError::PermanentAuthError => write!(f, "Permanent auth error"),
+//!         }
+//!     }
+//! }
+//!
+//! impl std::error::Error for MyError {}
 //!
 //! async fn fetch_sensitive_data() -> Result<String, MyError> {
 //!     // ...
@@ -84,7 +107,7 @@
 //!         matches!(e, MyError::TransientNetworkError)
 //!     };
 //!
-//!     let operation = || async { fetch_sensitive_data().await };
+//!     let operation = move || async move { fetch_sensitive_data().await };
 //!
 //!     let result = Retry::new(strategy, operation)
 //!         .with_condition(condition)
@@ -106,16 +129,14 @@ pub use backoff::{Backoff, ExponentialBackoff, FibonacciBackoff, FixedDelay};
 #[cfg(feature = "jitter")]
 pub use backoff::Jitter;
 
-use futures_core::IntoFuture;
 use std::error::Error;
-use std::future::Future;
+use std::future::{Future, IntoFuture};
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
-/// A predicate function that always returns true, retryable for all errors.
-fn default_condition<E: Error + ?Sized>(_: &E) -> bool {
-    true
-}
+/// A condition that retries on all errors.
+#[derive(Clone, Copy, Debug)]
+pub struct RetryAll;
 
 /// The main builder struct for a retryable operation.
 ///
@@ -134,22 +155,22 @@ where
     max_duration: Option<Duration>,
 }
 
-// Implementation block for creating a new Retry with the default condition.
-impl<S, O> Retry<S, O, fn(&dyn Error) -> bool>
+// Implementation block for creating a new Retry that retries on all errors.
+impl<S, O> Retry<S, O, RetryAll>
 where
     S: Backoff,
 {
-    /// Creates a new `Retry` instance.
+    /// Creates a new `Retry` instance that retries on *all* errors.
     ///
     /// - `strategy`: A [`Backoff`] strategy iterator (e.g., [`ExponentialBackoff`]).
     /// - `operation`: A closure that returns a `Future` (e.g., `|| async { ... }`).
     ///
-    /// By default, it retries on *all* errors. Use [`with_condition()`] to change this.
+    /// Use [`with_condition()`] to specify custom retry logic.
     pub fn new(strategy: S, operation: O) -> Self {
         Self {
             strategy,
             operation,
-            condition: default_condition,
+            condition: RetryAll,
             max_duration: None,
         }
     }
@@ -180,7 +201,7 @@ where
 
     /// Sets a maximum total duration for the entire retry operation.
     ///
-    * If the total time (including retries and delays) exceeds this
+    /// If the total time (including retries and delays) exceeds this
     /// duration, the loop will stop and return the last error.
     ///
     /// Fulfills FR6.
@@ -190,16 +211,16 @@ where
     }
 }
 
-/// The core retry logic, implemented via `IntoFuture`.
+/// The core retry logic for RetryAll, implemented via `IntoFuture`.
 ///
-/// This allows `Retry` to be `.await`ed directly.
-impl<S, O, C, F, T, E> IntoFuture for Retry<S, O, C>
+/// This allows `Retry` to be `.await`ed directly when using RetryAll (retries all errors).
+impl<S, O, F, T, E> IntoFuture for Retry<S, O, RetryAll>
 where
-    S: Backoff,
-    O: FnMut() -> F,
-    C: FnMut(&E) -> bool,
-    F: Future<Output = Result<T, E>>,
-    E: Error,
+    S: Backoff + Send + 'static,
+    O: FnMut() -> F + Send + 'static,
+    F: Future<Output = Result<T, E>> + Send,
+    E: Send + std::fmt::Display,
+    T: Send,
 {
     type Output = Result<T, E>;
 
@@ -210,10 +231,10 @@ where
     fn into_future(mut self) -> Self::IntoFuture {
         Box::pin(async move {
             let start_time = Instant::now();
-            let mut attempt = 0;
+            let mut _attempt = 0;
 
             loop {
-                attempt += 1;
+                _attempt += 1;
 
                 // Execute the async operation.
                 let result = (self.operation)().await;
@@ -222,7 +243,7 @@ where
                     // Success, return the value.
                     Ok(value) => {
                         #[cfg(feature = "logging")]
-                        log::trace!("Operation succeeded on attempt {}", attempt);
+                        log::trace!("Operation succeeded on attempt {}", _attempt);
                         return Ok(value);
                     }
                     // Failure, check if we should retry.
@@ -230,7 +251,100 @@ where
                         #[cfg(feature = "logging")]
                         log::warn!(
                             "Operation failed on attempt {} with error: {}",
-                            attempt,
+                            _attempt,
+                            e
+                        );
+
+                        // Check max total duration limit
+                        if let Some(max_duration) = self.max_duration {
+                            if start_time.elapsed() >= max_duration {
+                                #[cfg(feature = "logging")]
+                                log::error!(
+                                    "Retry failed: max duration ({:?}) exceeded.",
+                                    max_duration
+                                );
+                                return Err(e); // Exhausted time
+                            }
+                        }
+
+                        // RetryAll always retries, so no condition check needed
+
+                        // Get next backoff duration
+                        if let Some(delay) = self.strategy.next() {
+                            // Check if the *sleep itself* would exceed max duration
+                            if let Some(max_duration) = self.max_duration {
+                                if start_time.elapsed() + delay > max_duration {
+                                    #[cfg(feature = "logging")]
+                                    log::error!(
+                                        "Retry failed: next delay ({:?}) would exceed max duration.",
+                                        delay
+                                    );
+                                    return Err(e); // Sleep would exceed total duration
+                                }
+                            }
+
+                            // Perform the runtime-agnostic sleep
+                            #[cfg(feature = "logging")]
+                            log::trace!("Retrying after delay of {:?}", delay);
+                            sleep::sleep(delay).await;
+                        } else {
+                            // Backoff strategy is exhausted
+                            #[cfg(feature = "logging")]
+                            log::error!(
+                                "Retry failed: backoff strategy exhausted after {} attempts.",
+                                _attempt
+                            );
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+        })
+    }
+}
+
+/// The core retry logic for custom conditions, implemented via `IntoFuture`.
+///
+/// This allows `Retry` to be `.await`ed directly when using a custom condition.
+impl<S, O, C, F, T, E> IntoFuture for Retry<S, O, C>
+where
+    S: Backoff + Send + 'static,
+    O: FnMut() -> F + Send + 'static,
+    C: FnMut(&E) -> bool + Send + 'static,
+    F: Future<Output = Result<T, E>> + Send,
+    E: Send + std::fmt::Display,
+    T: Send,
+{
+    type Output = Result<T, E>;
+
+    // We box the future to avoid complex type signatures in the return.
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send>>;
+
+    /// Contains the core retry loop logic.
+    fn into_future(mut self) -> Self::IntoFuture {
+        Box::pin(async move {
+            let start_time = Instant::now();
+            let mut _attempt = 0;
+
+            loop {
+                _attempt += 1;
+
+                // Execute the async operation.
+                let result = (self.operation)().await;
+
+                match result {
+                    // Success, return the value.
+                    Ok(value) => {
+                        #[cfg(feature = "logging")]
+                        log::trace!("Operation succeeded on attempt {}", _attempt);
+                        return Ok(value);
+                    }
+                    // Failure, check if we should retry.
+                    Err(e) => {
+                        #[cfg(feature = "logging")]
+                        log::warn!(
+                            "Operation failed on attempt {} with error: {}",
+                            _attempt,
                             e
                         );
 
@@ -279,7 +393,7 @@ where
                             #[cfg(feature = "logging")]
                             log::error!(
                                 "Retry failed: backoff strategy exhausted after {} attempts.",
-                                attempt
+                                _attempt
                             );
                             return Err(e);
                         }
