@@ -106,14 +106,14 @@ pub use backoff::{Backoff, ExponentialBackoff, FibonacciBackoff, FixedDelay};
 #[cfg(feature = "jitter")]
 pub use backoff::Jitter;
 
-use futures_core::IntoFuture;
+use std::future::IntoFuture;
 use std::error::Error;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 /// A predicate function that always returns true, retryable for all errors.
-fn default_condition<E: Error + ?Sized>(_: &E) -> bool {
+fn default_condition(_: &dyn Error) -> bool {
     true
 }
 
@@ -180,7 +180,7 @@ where
 
     /// Sets a maximum total duration for the entire retry operation.
     ///
-    * If the total time (including retries and delays) exceeds this
+    /// If the total time (including retries and delays) exceeds this
     /// duration, the loop will stop and return the last error.
     ///
     /// Fulfills FR6.
@@ -195,19 +195,20 @@ where
 /// This allows `Retry` to be `.await`ed directly.
 impl<S, O, C, F, T, E> IntoFuture for Retry<S, O, C>
 where
-    S: Backoff,
-    O: FnMut() -> F,
-    C: FnMut(&E) -> bool,
-    F: Future<Output = Result<T, E>>,
-    E: Error,
+    S: Backoff + Send + 'static,
+    O: FnMut() -> F + Send + 'static,
+    C: FnMut(&E) -> bool + Send + 'static,
+    F: Future<Output = Result<T, E>> + Send,
+    E: Error + Send,
+    T: Send,
 {
     type Output = Result<T, E>;
 
     // We box the future to avoid complex type signatures in the return.
-    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send>>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'static>>;
 
     /// Contains the core retry loop logic.
-    fn into_future(mut self) -> Self::IntoFuture {
+    fn into_future(mut self) -> <Retry<S, O, C> as IntoFuture>::IntoFuture {
         Box::pin(async move {
             let start_time = Instant::now();
             let mut attempt = 0;
@@ -287,5 +288,34 @@ where
                 }
             }
         })
+    }
+}
+#[cfg(all(test, feature = "tokio-timer"))]
+mod tests {
+    use super::*;
+    use crate::backoff::FixedDelay;
+    use std::time::Duration;
+    
+    #[derive(Debug, Clone, PartialEq)]
+    struct TestError(String);
+    
+    impl std::fmt::Display for TestError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.0)
+        }
+    }
+    
+    impl std::error::Error for TestError {}
+
+    #[tokio::test]
+    async fn test_simple_retry() {
+        let strategy = FixedDelay::new(Duration::from_millis(10)).take(3);
+        
+        let operation = || async {
+            Ok::<u32, TestError>(42)
+        };
+        
+        let result = Retry::new(strategy, operation).await;
+        assert_eq!(result, Ok(42));
     }
 }

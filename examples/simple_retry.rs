@@ -1,6 +1,6 @@
 // Author: Jacques Murray
 
-use async_retry_project::{backoff::ExponentialBackoff, Retry};
+use async_retry::{backoff::ExponentialBackoff, Retry};
 use std::time::{Duration, Instant};
 
 // A mock function that will fail 3 times before succeeding.

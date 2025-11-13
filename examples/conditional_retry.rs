@@ -2,7 +2,7 @@
 
 mod common;
 
-use async_retry_project::{backoff::ExponentialBackoff, Retry};
+use async_retry::{backoff::ExponentialBackoff, Retry};
 use common::{should_retry_api_error, ApiError};
 use reqwest::StatusCode;
 use std::time::Duration;

@@ -1,12 +1,12 @@
 // Author: Jacques Murray
 
-use async_retry_project::{backoff::FixedDelay, Retry};
-use std::cell::Cell;
-use std::rc::Rc;
+use async_retry::{backoff::FixedDelay, Retry};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 // A simple error for testing
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 struct TestError(String);
 
 // Implement Error for our test error
@@ -18,9 +18,10 @@ impl std::fmt::Display for TestError {
 impl std::error::Error for TestError {}
 
 // A stateful operation for testing
+#[derive(Clone)]
 struct Op {
-    // Use Rc<Cell> for interior mutability without async Mutex
-    attempts: Rc<Cell<u32>>,
+    // Use Arc<AtomicU32> for thread-safe interior mutability
+    attempts: Arc<AtomicU32>,
     succeed_on: u32,
     error_to_return: TestError,
 }
@@ -28,7 +29,7 @@ struct Op {
 impl Op {
     fn new(succeed_on: u32, error: &str) -> Self {
         Self {
-            attempts: Rc::new(Cell::new(0)),
+            attempts: Arc::new(AtomicU32::new(0)),
             succeed_on,
             error_to_return: TestError(error.to_string()),
         }
@@ -36,11 +37,10 @@ impl Op {
 
     // The operation itself
     async fn run(&self) -> Result<u32, TestError> {
-        let current = self.attempts.get();
-        self.attempts.set(current + 1);
+        let current = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
 
-        if self.attempts.get() == self.succeed_on {
-            Ok(self.attempts.get())
+        if current == self.succeed_on {
+            Ok(current)
         } else {
             // Clone the error to return it
             Err(TestError(self.error_to_return.0.clone()))
@@ -48,7 +48,7 @@ impl Op {
     }
 
     fn attempts(&self) -> u32 {
-        self.attempts.get()
+        self.attempts.load(Ordering::SeqCst)
     }
 }
 
@@ -57,7 +57,11 @@ async fn test_success_on_first_try() {
     let op = Op::new(1, "fail"); // Succeeds on attempt 1
     let strategy = FixedDelay::new(Duration::from_millis(10)).take(5);
 
-    let result = Retry::new(strategy, || op.run()).await;
+    let op_clone = op.clone();
+    let result = Retry::new(strategy, move || {
+        let op = op_clone.clone();
+        async move { op.run().await }
+    }).await;
 
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), 1);
@@ -69,7 +73,11 @@ async fn test_success_on_third_try() {
     let op = Op::new(3, "fail"); // Succeeds on attempt 3
     let strategy = FixedDelay::new(Duration::from_millis(10)).take(5);
 
-    let result = Retry::new(strategy, || op.run()).await;
+    let op_clone = op.clone();
+    let result = Retry::new(strategy, move || {
+        let op = op_clone.clone();
+        async move { op.run().await }
+    }).await;
 
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), 3);
@@ -83,7 +91,11 @@ async fn test_failure_on_max_retries() {
     let strategy = FixedDelay::new(Duration::from_millis(10)).take(3); // But we only allow 3 attempts
 
     let start = Instant::now();
-    let result = Retry::new(strategy, || op.run()).await;
+    let op_clone = op.clone();
+    let result = Retry::new(strategy, move || {
+        let op = op_clone.clone();
+        async move { op.run().await }
+    }).await;
 
     let elapsed = start.elapsed();
 
@@ -101,7 +113,11 @@ async fn test_failure_on_max_duration() {
     // Strategy allows 10 retries, but each sleeps 50ms
     let strategy = FixedDelay::new(Duration::from_millis(50)).take(10);
 
-    let result = Retry::new(strategy, || op.run())
+    let op_clone = op.clone();
+    let result = Retry::new(strategy, move || {
+        let op = op_clone.clone();
+        async move { op.run().await }
+    })
         .with_max_duration(Duration::from_millis(75)) // Max duration is 75ms
         .await;
 
@@ -120,7 +136,11 @@ async fn test_failure_on_condition() {
 
     let condition = |e: &TestError| e.0 != "PERMANENT";
 
-    let result = Retry::new(strategy, || op.run())
+    let op_clone = op.clone();
+    let result = Retry::new(strategy, move || {
+        let op = op_clone.clone();
+        async move { op.run().await }
+    })
         .with_condition(condition)
         .await;
 
