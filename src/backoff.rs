@@ -1,9 +1,64 @@
 // Author: Jacques Murray
 
-//! Defines the `Backoff` trait and built-in backoff strategies.
+//! Backoff strategies for controlling retry timing.
 //!
-//! A `Backoff` is simply an `Iterator` that yields `Duration`s.
-//! When the iterator returns `None`, the retry loop stops.
+//! This module provides built-in backoff strategies that control how long to wait
+//! between retry attempts. All strategies implement the [`Backoff`] trait, which is
+//! simply an [`Iterator`] over [`Duration`].
+//!
+//! # Choosing a Strategy
+//!
+//! - **[`FixedDelay`]**: Use when you want consistent delays. Good for simple cases.
+//! - **[`ExponentialBackoff`]**: Most common choice. Delays increase exponentially,
+//!   reducing load on failing services.
+//! - **[`FibonacciBackoff`]**: Slower growth than exponential, useful when you want
+//!   a middle ground between fixed and exponential.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use async_retry::backoff::{FixedDelay, ExponentialBackoff, FibonacciBackoff};
+//! use std::time::Duration;
+//!
+//! // Fixed delay of 1 second, limited to 5 retries
+//! let fixed = FixedDelay::new(Duration::from_secs(1)).take(5);
+//!
+//! // Exponential backoff starting at 100ms, with max delay and retry limits
+//! let exponential = ExponentialBackoff::new(Duration::from_millis(100))
+//!     .with_max_delay(Duration::from_secs(30))
+//!     .with_max_retries(10);
+//!
+//! // Fibonacci backoff starting at 1 second
+//! let fibonacci = FibonacciBackoff::new(Duration::from_secs(1))
+//!     .with_max_retries(8);
+//! ```
+//!
+//! # Custom Strategies
+//!
+//! You can create custom backoff strategies by implementing [`Iterator<Item = Duration>`]:
+//!
+//! ```rust
+//! use async_retry::backoff::Backoff;
+//! use std::time::Duration;
+//!
+//! struct LinearBackoff {
+//!     current: Duration,
+//!     increment: Duration,
+//! }
+//!
+//! impl Iterator for LinearBackoff {
+//!     type Item = Duration;
+//!    
+//!     fn next(&mut self) -> Option<Self::Item> {
+//!         let delay = self.current;
+//!         self.current += self.increment;
+//!         Some(delay)
+//!     }
+//! }
+//!
+//! // Backoff is automatically implemented for any Iterator<Item = Duration>
+//! // So LinearBackoff now implements Backoff!
+//! ```
 
 use std::time::Duration;
 

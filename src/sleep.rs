@@ -1,29 +1,66 @@
 // Author: Jacques Murray
 
-//! Provides a runtime-agnostic sleep function.
+//! Runtime-agnostic sleep functionality.
 //!
-//! This module uses feature flags (`tokio-timer`, `async-std-timer`)
-//! to determine which runtime's sleep function to use.
+//! This module provides a single `sleep` function that works with different async
+//! runtimes. The actual implementation is selected at compile time based on feature
+//! flags.
+//!
+//! # Feature Flags
+//!
+//! You must enable exactly one of these features:
+//! - `tokio-timer` - Use Tokio's timer implementation
+//! - `async-std-timer` - Use async-std's timer implementation
+//!
+//! If no timer feature is enabled, you'll get a compile error with a helpful message.
+//!
+//! # Design
+//!
+//! This approach using `cfg_if!` is the idiomatic way to provide runtime-agnostic
+//! functionality in Rust async libraries. It has zero runtime cost - the compiler
+//! selects the correct implementation at build time.
 
 use std::time::Duration;
 
-/// Sleeps for the specified duration, using the async runtime
-/// selected by the crate's feature flags.
+/// Asynchronously sleeps for the specified duration.
 ///
-/// Will produce a compile error if no timer feature is enabled.
+/// This function delegates to the appropriate runtime's sleep implementation
+/// based on which feature flag is enabled.
+///
+/// # Arguments
+///
+/// * `duration` - How long to sleep
+///
+/// # Compile-Time Behavior
+///
+/// - With `tokio-timer`: Uses [`tokio::time::sleep`]
+/// - With `async-std-timer`: Uses [`async_std::task::sleep`]
+/// - With neither: Produces a compile error
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use std::time::Duration;
+/// # use async_retry::backoff::FixedDelay;
+///
+/// # async fn example() {
+/// // Sleep is called internally by the retry logic
+/// // You don't typically call it directly
+/// # }
+/// ```
 pub async fn sleep(duration: Duration) {
-    // This is the idiomatic way to handle runtime-agnostic timers.
+    // Use cfg_if for clean compile-time feature selection
     cfg_if::cfg_if! {
         if #[cfg(feature = "tokio-timer")] {
-            // Use tokio's sleep
             tokio::time::sleep(duration).await;
         } else if #[cfg(feature = "async-std-timer")] {
-            // Use async-std's sleep
             async_std::task::sleep(duration).await;
         } else {
-            // Compile error if no runtime is selected.
-            // This forces the user to make a choice.
-            compile_error!("No async timer feature enabled. Please enable 'tokio-timer' or 'async-std-timer'.");
+            // Provide a helpful compile error if no timer feature is enabled
+            compile_error!(
+                "No async timer feature enabled. \
+                 Please enable either 'tokio-timer' or 'async-std-timer' in your Cargo.toml."
+            );
         }
     }
-  }
+}
