@@ -18,7 +18,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! async-retry-project = { path = "path/to/async-retry-project" }
+//! async-retry = { path = "path/to/async-retry" }
 //! # Enable your runtime (e.g., Tokio)
 //! tokio = { version = "1", features = ["full"] }
 //! ```
@@ -29,13 +29,18 @@
 //! ### Example: Simple Retry
 //!
 //! ```rust,no_run
-//! use async_retry_project::{Retry, backoff::ExponentialBackoff};
+//! use async_retry::{Retry, backoff::ExponentialBackoff};
 //! use std::time::Duration;
+//! use thiserror::Error;
+//!
+//! #[derive(Debug, Error)]
+//! #[error("Failed to connect: {0}")]
+//! struct ConnectionError(String);
 //!
 //! // A mock function that might fail
-//! async fn fetch_data() -> Result<String, String> {
+//! async fn fetch_data() -> Result<String, ConnectionError> {
 //!     // ... logic that might fail
-//!     Err("Failed to connect".to_string())
+//!     Err(ConnectionError("Network error".to_string()))
 //! }
 //!
 //! #[tokio::main]
@@ -59,7 +64,7 @@
 //! ### Example: Conditional Retry
 //!
 //! ```rust,no_run
-//! use async_retry_project::{Retry, backoff::ExponentialBackoff};
+//! use async_retry::{Retry, backoff::ExponentialBackoff};
 //! use std::time::Duration;
 //!
 //! // Define a custom error
@@ -68,6 +73,17 @@
 //!     TransientNetworkError,
 //!     PermanentAuthError,
 //! }
+//!
+//! impl std::fmt::Display for MyError {
+//!     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//!         match self {
+//!             MyError::TransientNetworkError => write!(f, "Network error"),
+//!             MyError::PermanentAuthError => write!(f, "Auth error"),
+//!         }
+//!     }
+//! }
+//!
+//! impl std::error::Error for MyError {}
 //!
 //! async fn fetch_sensitive_data() -> Result<String, MyError> {
 //!     // ...
@@ -136,7 +152,7 @@ where
 }
 
 // Implementation block for creating a new Retry with the default condition.
-impl<S, O> Retry<S, O, fn(&dyn Error) -> bool>
+impl<S, O> Retry<S, O, AlwaysRetry>
 where
     S: Backoff,
 {
@@ -150,7 +166,7 @@ where
         Self {
             strategy,
             operation,
-            condition: default_condition,
+            condition: AlwaysRetry,
             max_duration: None,
         }
     }
@@ -191,9 +207,97 @@ where
     }
 }
 
-/// The core retry logic, implemented via `IntoFuture`.
-///
-/// This allows `Retry` to be `.await`ed directly.
+/// The core retry logic, implemented via `IntoFuture` for the default (always retry) condition.
+impl<S, O, F, T, E> IntoFuture for Retry<S, O, AlwaysRetry>
+where
+    S: Backoff + Send + 'static,
+    O: FnMut() -> F + Send + 'static,
+    F: Future<Output = Result<T, E>> + Send,
+    E: Error + Send,
+    T: Send,
+{
+    type Output = Result<T, E>;
+
+    // We box the future to avoid complex type signatures in the return.
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'static>>;
+
+    /// Contains the core retry loop logic.
+    fn into_future(mut self) -> <Retry<S, O, AlwaysRetry> as IntoFuture>::IntoFuture {
+        Box::pin(async move {
+            let start_time = Instant::now();
+            let mut _attempt = 0;
+
+            loop {
+                _attempt += 1;
+
+                // Execute the async operation.
+                let result = (self.operation)().await;
+
+                match result {
+                    // Success, return the value.
+                    Ok(value) => {
+                        #[cfg(feature = "logging")]
+                        log::trace!("Operation succeeded on attempt {}", _attempt);
+                        return Ok(value);
+                    }
+                    // Failure, check if we should retry.
+                    Err(e) => {
+                        #[cfg(feature = "logging")]
+                        log::warn!(
+                            "Operation failed on attempt {} with error: {}",
+                            _attempt,
+                            e
+                        );
+
+                        // Check max total duration limit
+                        if let Some(max_duration) = self.max_duration {
+                            if start_time.elapsed() >= max_duration {
+                                #[cfg(feature = "logging")]
+                                log::error!(
+                                    "Retry failed: max duration ({:?}) exceeded.",
+                                    max_duration
+                                );
+                                return Err(e); // Exhausted time
+                            }
+                        }
+
+                        // Always retry with AlwaysRetry condition
+
+                        // Get next backoff duration
+                        if let Some(delay) = self.strategy.next() {
+                            // Check if the *sleep itself* would exceed max duration
+                            if let Some(max_duration) = self.max_duration {
+                                if start_time.elapsed() + delay > max_duration {
+                                    #[cfg(feature = "logging")]
+                                    log::error!(
+                                        "Retry failed: next delay ({:?}) would exceed max duration.",
+                                        delay
+                                    );
+                                    return Err(e); // Sleep would exceed total duration
+                                }
+                            }
+
+                            // Perform the runtime-agnostic sleep
+                            #[cfg(feature = "logging")]
+                            log::trace!("Retrying after delay of {:?}", delay);
+                            sleep::sleep(delay).await;
+                        } else {
+                            // Backoff strategy is exhausted
+                            #[cfg(feature = "logging")]
+                            log::error!(
+                                "Retry failed: backoff strategy exhausted after {} attempts.",
+                                _attempt
+                            );
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+        })
+    }
+}
+
+/// The core retry logic, implemented via `IntoFuture` for custom conditions.
 impl<S, O, C, F, T, E> IntoFuture for Retry<S, O, C>
 where
     S: Backoff + Send + 'static,
@@ -206,7 +310,7 @@ where
     type Output = Result<T, E>;
 
     // We box the future to avoid complex type signatures in the return.
-    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send>>;
+    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'static>>;
 
     /// Contains the core retry loop logic.
     fn into_future(mut self) -> <Retry<S, O, C> as IntoFuture>::IntoFuture {

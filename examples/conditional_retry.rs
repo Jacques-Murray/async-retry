@@ -2,9 +2,8 @@
 
 mod common;
 
-use async_retry_project::{backoff::ExponentialBackoff, Retry};
+use async_retry::{backoff::ExponentialBackoff, Retry};
 use common::{should_retry_api_error, ApiError};
-use reqwest::StatusCode;
 use std::time::Duration;
 
 /// A mock API fetcher.
@@ -34,7 +33,7 @@ async fn run_example(code: u16, desc: &str) {
         .with_max_retries(3); // 3 retries = 3 total attempts
 
     // The operation closure captures the status code
-    let operation = || async { fetch_important_data(code).await };
+    let operation = move || async move { fetch_important_data(code).await };
 
     let result = Retry::new(strategy, operation)
         .with_condition(should_retry_api_error) // Use our custom condition
