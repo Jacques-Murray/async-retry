@@ -106,9 +106,9 @@ pub use backoff::{Backoff, ExponentialBackoff, FibonacciBackoff, FixedDelay};
 #[cfg(feature = "jitter")]
 pub use backoff::Jitter;
 
-use std::future::IntoFuture;
 use std::error::Error;
 use std::future::Future;
+use std::future::IntoFuture;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
@@ -211,7 +211,8 @@ where
     fn into_future(mut self) -> <Retry<S, O, C> as IntoFuture>::IntoFuture {
         Box::pin(async move {
             let start_time = Instant::now();
-            let mut _attempt = 0;
+            #[allow(unused_variables)]
+            let mut attempt = 0;
 
             loop {
                 _attempt += 1;
@@ -229,11 +230,7 @@ where
                     // Failure, check if we should retry.
                     Err(e) => {
                         #[cfg(feature = "logging")]
-                        log::warn!(
-                            "Operation failed on attempt {} with error: {}",
-                            _attempt,
-                            e
-                        );
+                        log::warn!("Operation failed on attempt {} with error: {}", _attempt, e);
 
                         // Check max total duration limit
                         if let Some(max_duration) = self.max_duration {
