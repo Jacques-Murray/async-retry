@@ -51,7 +51,6 @@ impl Iterator for FixedDelay {
 #[derive(Debug, Clone, Copy)]
 pub struct ExponentialBackoff {
     current: Duration,
-    base: Duration,
     max_delay: Option<Duration>,
     max_retries: Option<usize>,
     attempt: usize,
@@ -64,7 +63,6 @@ impl ExponentialBackoff {
     pub fn new(base_delay: Duration) -> Self {
         Self {
             current: base_delay,
-            base: base_delay,
             max_delay: None,
             max_retries: None,
             attempt: 0,
