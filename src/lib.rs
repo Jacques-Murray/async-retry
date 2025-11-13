@@ -37,6 +37,18 @@
 //! #[error("Failed to connect: {0}")]
 //! struct ConnectionError(String);
 //!
+//! // Define a simple error type
+//! #[derive(Debug, Clone)]
+//! struct MyError(String);
+//!
+//! impl std::fmt::Display for MyError {
+//!     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//!         write!(f, "{}", self.0)
+//!     }
+//! }
+//!
+//! impl std::error::Error for MyError {}
+//!
 //! // A mock function that might fail
 //! async fn fetch_data() -> Result<String, ConnectionError> {
 //!     // ... logic that might fail
@@ -48,7 +60,7 @@
 //!     let strategy = ExponentialBackoff::new(Duration::from_millis(100))
 //!         .with_max_retries(5);
 //!
-//!     let operation = || async {
+//!     let operation = move || async move {
 //!         fetch_data().await
 //!     };
 //!
@@ -100,7 +112,7 @@
 //!         matches!(e, MyError::TransientNetworkError)
 //!     };
 //!
-//!     let operation = || async { fetch_sensitive_data().await };
+//!     let operation = move || async move { fetch_sensitive_data().await };
 //!
 //!     let result = Retry::new(strategy, operation)
 //!         .with_condition(condition)
@@ -134,12 +146,70 @@ fn default_condition(_: &dyn Error) -> bool {
     true
 }
 
-/// The main builder struct for a retryable operation.
+/// The main builder struct for retryable operations.
 ///
-/// This struct is created by [`Retry::new()`] and configured using its
-/// "builder" style methods like [`with_condition()`] and [`with_max_duration()`].
+/// `Retry` provides a fluent builder API for configuring retry behavior. It is generic
+/// over three type parameters:
 ///
-/// It implements `IntoFuture`, so you can simply `.await` it.
+/// - `S`: The backoff strategy (implements [`Backoff`])
+/// - `O`: The operation closure that returns a future
+/// - `C`: The condition function that determines if an error should be retried
+///
+/// # Type Parameters
+///
+/// The type parameters are automatically inferred from the arguments passed to
+/// [`Retry::new()`] and builder methods, so you typically don't need to specify them.
+///
+/// # Builder Methods
+///
+/// - [`new()`](Retry::new) - Creates a new retry instance with default "retry all" behavior
+/// - [`with_condition()`](Retry::with_condition) - Sets a custom retry condition
+/// - [`with_max_duration()`](Retry::with_max_duration) - Sets a maximum total duration
+///
+/// # Execution
+///
+/// `Retry` implements [`IntoFuture`], which means you can `.await` it directly:
+///
+/// ```rust,no_run
+/// # use async_retry::{Retry, backoff::FixedDelay};
+/// # use std::time::Duration;
+/// # #[derive(Debug, Clone)]
+/// # struct MyError;
+/// # impl std::fmt::Display for MyError {
+/// #     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { Ok(()) }
+/// # }
+/// # impl std::error::Error for MyError {}
+/// # async fn operation() -> Result<(), MyError> { Ok(()) }
+/// # async fn example() {
+/// let strategy = FixedDelay::new(Duration::from_secs(1)).take(3);
+/// let result = Retry::new(strategy, move || async move { operation().await }).await;
+/// # }
+/// ```
+///
+/// # Closure Requirements
+///
+/// The operation closure must:
+/// - Return a `Future` that produces a `Result<T, E>`
+/// - Be `Send + 'static` for thread safety
+/// - Be `FnMut` so it can be called multiple times
+///
+/// To satisfy these requirements, use `move || async move { ... }` pattern:
+///
+/// ```rust,no_run
+/// # use async_retry::{Retry, backoff::FixedDelay};
+/// # use std::time::Duration;
+/// # #[derive(Debug, Clone)]
+/// # struct MyError;
+/// # impl std::fmt::Display for MyError {
+/// #     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { Ok(()) }
+/// # }
+/// # impl std::error::Error for MyError {}
+/// # async fn fetch() -> Result<String, MyError> { Ok(String::new()) }
+/// # async fn example() {
+/// let operation = move || async move { fetch().await };
+/// let result = Retry::new(FixedDelay::new(Duration::from_secs(1)), operation).await;
+/// # }
+/// ```
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct Retry<S, O, C>
 where
@@ -156,12 +226,44 @@ impl<S, O> Retry<S, O, AlwaysRetry>
 where
     S: Backoff,
 {
-    /// Creates a new `Retry` instance.
+    /// Creates a new `Retry` instance that retries on *all* errors.
     ///
-    /// - `strategy`: A [`Backoff`] strategy iterator (e.g., [`ExponentialBackoff`]).
-    /// - `operation`: A closure that returns a `Future` (e.g., `|| async { ... }`).
+    /// # Arguments
     ///
-    /// By default, it retries on *all* errors. Use [`with_condition()`] to change this.
+    /// * `strategy` - A [`Backoff`] strategy that controls retry timing
+    /// * `operation` - A closure returning a `Future<Output = Result<T, E>>`
+    ///
+    /// # Returns
+    ///
+    /// A `Retry` builder that can be configured further or awaited directly.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use async_retry::{Retry, backoff::ExponentialBackoff};
+    /// use std::time::Duration;
+    ///
+    /// # #[derive(Debug, Clone)]
+    /// # struct MyError;
+    /// # impl std::fmt::Display for MyError {
+    /// #     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { Ok(()) }
+    /// # }
+    /// # impl std::error::Error for MyError {}
+    /// # async fn fetch_data() -> Result<String, MyError> { Ok(String::new()) }
+    /// # async fn example() {
+    /// let strategy = ExponentialBackoff::new(Duration::from_millis(100))
+    ///     .with_max_retries(5);
+    ///
+    /// let result = Retry::new(strategy, move || async move {
+    ///     fetch_data().await
+    /// }).await;
+    /// # }
+    /// ```
+    ///
+    /// # See Also
+    ///
+    /// * [`with_condition()`](Retry::with_condition) - Add custom retry logic
+    /// * [`with_max_duration()`](Retry::with_max_duration) - Set time limit
     pub fn new(strategy: S, operation: O) -> Self {
         Self {
             strategy,
@@ -177,11 +279,48 @@ impl<S, O, C> Retry<S, O, C>
 where
     S: Backoff,
 {
-    /// Sets a new condition predicate for retrying.
+    /// Sets a custom condition for determining which errors should be retried.
     ///
-    /// The closure `condition` receives a reference to the error `&E` and
-    /// must return `true` if a retry should be attempted, or `false`
-    /// if the loop should give up and return the error.
+    /// By default, [`Retry::new()`] retries all errors. Use this method to specify
+    /// custom logic for which errors are retryable.
+    ///
+    /// # Arguments
+    ///
+    /// * `condition` - A closure `Fn(&E) -> bool` that returns `true` for retryable errors
+    ///
+    /// # Returns
+    ///
+    /// A new `Retry` instance with the specified condition.
+    ///
+    /// # Examples
+    ///
+    /// Only retry on network errors:
+    ///
+    /// ```rust,no_run
+    /// use async_retry::{Retry, backoff::FixedDelay};
+    /// use std::time::Duration;
+    ///
+    /// # #[derive(Debug, Clone)]
+    /// # enum ApiError {
+    /// #     Network,
+    /// #     Auth,
+    /// # }
+    /// # impl std::fmt::Display for ApiError {
+    /// #     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { Ok(()) }
+    /// # }
+    /// # impl std::error::Error for ApiError {}
+    /// # async fn call_api() -> Result<(), ApiError> { Ok(()) }
+    /// # async fn example() {
+    /// let condition = |e: &ApiError| matches!(e, ApiError::Network);
+    ///
+    /// let result = Retry::new(
+    ///     FixedDelay::new(Duration::from_secs(1)).take(3),
+    ///     move || async move { call_api().await }
+    /// )
+    /// .with_condition(condition)
+    /// .await;
+    /// # }
+    /// ```
     pub fn with_condition<NewC, E>(self, condition: NewC) -> Retry<S, O, NewC>
     where
         NewC: FnMut(&E) -> bool,
@@ -200,7 +339,41 @@ where
     /// If the total time (including retries and delays) exceeds this
     /// duration, the loop will stop and return the last error.
     ///
-    /// Fulfills FR6.
+    /// # Arguments
+    ///
+    /// * `max_duration` - The maximum total time to spend retrying
+    ///
+    /// # Behavior
+    ///
+    /// The retry loop checks the elapsed time:
+    /// 1. Before waiting for a backoff delay
+    /// 2. If the delay would cause the total time to exceed `max_duration`, the loop stops
+    ///
+    /// # Examples
+    ///
+    /// Limit retries to 10 seconds total:
+    ///
+    /// ```rust,no_run
+    /// use async_retry::{Retry, backoff::FixedDelay};
+    /// use std::time::Duration;
+    ///
+    /// # #[derive(Debug, Clone)]
+    /// # struct MyError;
+    /// # impl std::fmt::Display for MyError {
+    /// #     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { Ok(()) }
+    /// # }
+    /// # impl std::error::Error for MyError {}
+    /// # async fn operation() -> Result<(), MyError> { Ok(()) }
+    /// # async fn example() {
+    /// // Even though the strategy allows many retries, this will stop after 10 seconds
+    /// let result = Retry::new(
+    ///     FixedDelay::new(Duration::from_secs(1)),  // Infinite retries
+    ///     move || async move { operation().await }
+    /// )
+    /// .with_max_duration(Duration::from_secs(10))  // But stop after 10 seconds
+    /// .await;
+    /// # }
+    /// ```
     pub fn with_max_duration(mut self, max_duration: Duration) -> Self {
         self.max_duration = Some(max_duration);
         self

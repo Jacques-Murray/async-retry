@@ -43,7 +43,7 @@ async fn main() {
     let start = Instant::now();
 
     // The operation is a closure that returns the async block (Future)
-    let operation = || async { flaky_operation().await };
+    let operation = move || async move { flaky_operation().await };
 
     let result = Retry::new(strategy, operation).await;
 
