@@ -109,6 +109,7 @@ pub use backoff::Jitter;
 use std::error::Error;
 use std::future::Future;
 use std::future::IntoFuture;
+use std::future::IntoFuture;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
